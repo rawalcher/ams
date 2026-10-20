@@ -15,6 +15,7 @@ ffmpeg -i "$INPUT_FILE" \
   -map "[v1]" -map "[v2]" -map "[v3]" -map "[v4]" -map "[v5]" \
   -map 0:a \
   -c:v libx264 \
+  -force_key_frames "expr:gte(t,n_forced*2)" -sc_threshold 0 \
   -b:v:0 200k -b:v:1 500k -b:v:2 1M -b:v:3 2M -b:v:4 4M \
   -c:a copy \
   -f dash -seg_duration 2 \
