@@ -19,4 +19,4 @@ ffmpeg -i "$INPUT_FILE" \
   -c:a copy \
   -f dash -seg_duration 2 \
   -adaptation_sets "id=0,streams=v id=1,streams=a" \
-  "$OUTPUT_DIR/manifest.mpd"
+  "$OUTPUT_DIR/manifest.m3u8"

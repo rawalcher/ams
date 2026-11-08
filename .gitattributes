@@ -1,1 +1,17 @@
 *.mp4 filter=lfs diff=lfs merge=lfs -text
+bbb_sunflower_1080p_60fps_normal.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/hevc/200k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/av1/1M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/av1/200k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/av1/2M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/avc/1M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/avc/200k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/avc/2M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/hevc/4M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/av1/500k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/avc/500k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/hevc/1M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/hevc/500k.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/av1/4M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/avc/4M.mp4 filter=lfs diff=lfs merge=lfs -text
+task2/hevc/2M.mp4 filter=lfs diff=lfs merge=lfs -text

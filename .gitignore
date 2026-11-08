@@ -1,2 +1,6 @@
 .venv/
 __pycache__
+*.ts
+*.mkv
+*.266
+task2/**/*.mp4
