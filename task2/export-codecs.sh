@@ -2,12 +2,23 @@
 set -euo pipefail
 
 # Usage:
-#   ./export-codecs.sh <input_file> <output_root> <codec> [mode]
+#   ./export-codecs.sh <input_file> <output_root> <codec> [mode] [resolution]
 #
 # Modes:
 #   all     encode all bitrates and measure decoding (default)
 #   encode  only encode the bitrates
 #   decode  only measure decoding of already encoded bitrates
+#
+# Resolution:
+#   source  keep the input resolution (default)
+#   720p    scale to 720 lines, preserving the aspect ratio (1280x720 for 16:9)
+#   1080p   scale to 1080 lines, preserving the aspect ratio
+#   WxH     scale to an exact size, e.g. 1280x720
+#
+# The resolution can also be set with the RESOLUTION environment variable.
+# Use a separate output root for each resolution so files do not overwrite
+# each other, for example:
+#   ./export-codecs.sh input.mp4 converted/720p h264 all 720p
 #
 # Codecs:
 #   h264 (alias: avc)        libx264    -> <output_root>/avc/<bitrate>.mp4
@@ -19,6 +30,7 @@ set -euo pipefail
 # Example:
 #   ./export-codecs.sh input.mp4 converted h264
 #   ./export-codecs.sh input.mp4 converted hevc
+#   ./export-codecs.sh input.mp4 converted/720p h264 all 720p
 #
 # Each bitrate is encoded in its own encoder process and measured separately
 # with CodeCarbon. The emissions CSV is written next to the encoded files:
@@ -30,10 +42,12 @@ set -euo pipefail
 # VVC uses the standalone vvencapp encoder and vvdecapp decoder (AUR packages
 # vvenc and vvdec). The other codecs use ffmpeg's built-in encoder/decoder.
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-  echo "Usage: $0 <input_file> <output_root> <codec> [all|encode|decode]" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
+  echo "Usage: $0 <input_file> <output_root> <codec> [all|encode|decode] [resolution]" >&2
   echo "Supported codecs: h264, hevc, vvc, av1" >&2
+  echo "Supported resolutions: source, 720p, 1080p, <width>x<height>" >&2
   echo "Example: $0 input.mp4 converted h264" >&2
+  echo "Example: $0 input.mp4 converted/720p h264 all 720p" >&2
   exit 1
 fi
 
@@ -42,11 +56,50 @@ OUTPUT_ROOT="$2"
 CODEC_ARG="${3,,}"
 MODE="${4:-all}"
 MODE="${MODE,,}"
+RESOLUTION="${5:-${RESOLUTION:-source}}"
+RESOLUTION="${RESOLUTION,,}"
 
 case "$MODE" in
   all|encode|decode) ;;
   *)
     echo "Unsupported mode: $MODE (expected all, encode, or decode)" >&2
+    exit 1
+    ;;
+esac
+
+SCALE_FILTER=""
+TARGET_WIDTH=""
+TARGET_HEIGHT=""
+OUTPUT_WIDTH=""
+OUTPUT_HEIGHT=""
+case "$RESOLUTION" in
+  source|native|original|"")
+    ;;
+  [0-9]*x[0-9]*)
+    TARGET_WIDTH="${RESOLUTION%x*}"
+    TARGET_HEIGHT="${RESOLUTION#*x}"
+    if ! [[ "$TARGET_WIDTH" =~ ^[0-9]+$ && "$TARGET_HEIGHT" =~ ^[0-9]+$ ]] \
+      || [ "$TARGET_WIDTH" -le 0 ] || [ "$TARGET_HEIGHT" -le 0 ]; then
+      echo "Invalid resolution: $RESOLUTION (expected <width>x<height>)" >&2
+      exit 1
+    fi
+    # yuv420p requires even dimensions.
+    TARGET_WIDTH=$((TARGET_WIDTH / 2 * 2))
+    TARGET_HEIGHT=$((TARGET_HEIGHT / 2 * 2))
+    SCALE_FILTER="scale=${TARGET_WIDTH}:${TARGET_HEIGHT}"
+    ;;
+  *p)
+    TARGET_HEIGHT="${RESOLUTION%p}"
+    if ! [[ "$TARGET_HEIGHT" =~ ^[0-9]+$ ]] || [ "$TARGET_HEIGHT" -le 0 ]; then
+      echo "Invalid resolution: $RESOLUTION (expected e.g. 720p)" >&2
+      exit 1
+    fi
+    TARGET_HEIGHT=$((TARGET_HEIGHT / 2 * 2))
+    # -2 lets ffmpeg choose an even width that preserves the aspect ratio.
+    SCALE_FILTER="scale=-2:${TARGET_HEIGHT}"
+    ;;
+  *)
+    echo "Unsupported resolution: $RESOLUTION (expected source, 720p, 1080p, or <width>x<height>)" >&2
     exit 1
     ;;
 esac
@@ -125,7 +178,8 @@ if [ "$ENCODER_MODE" = "vvencapp" ] \
   exit 1
 fi
 
-if [ "$ENCODER_MODE" = "vvencapp" ] && [ "$MODE" != "decode" ]; then
+if { [ "$ENCODER_MODE" = "vvencapp" ] || [ -n "$SCALE_FILTER" ]; } \
+  && [ "$MODE" != "decode" ]; then
   if ! command -v ffprobe >/dev/null 2>&1; then
     echo "ffprobe not found (part of ffmpeg)." >&2
     exit 1
@@ -139,6 +193,14 @@ if [ "$ENCODER_MODE" = "vvencapp" ] && [ "$MODE" != "decode" ]; then
     echo "Could not probe video parameters from: $INPUT_FILE" >&2
     exit 1
   fi
+  if [ -n "$SCALE_FILTER" ] && [ -z "$TARGET_WIDTH" ]; then
+    TARGET_WIDTH=$((SOURCE_WIDTH * TARGET_HEIGHT / SOURCE_HEIGHT))
+    if [ $((TARGET_WIDTH % 2)) -ne 0 ]; then
+      TARGET_WIDTH=$((TARGET_WIDTH - 1))
+    fi
+  fi
+  OUTPUT_WIDTH="${TARGET_WIDTH:-$SOURCE_WIDTH}"
+  OUTPUT_HEIGHT="${TARGET_HEIGHT:-$SOURCE_HEIGHT}"
 fi
 
 if [ -x "$SCRIPT_DIR/.venv/bin/codecarbon" ]; then
@@ -156,6 +218,11 @@ OUTPUT_DIR="$OUTPUT_ROOT/$OUTPUT_SUBDIR"
 mkdir -p "$OUTPUT_DIR"
 export CODECARBON_OUTPUT_DIR="$OUTPUT_DIR"
 
+SCALE_ARGS=()
+if [ -n "$SCALE_FILTER" ]; then
+  SCALE_ARGS=(-vf "$SCALE_FILTER")
+fi
+
 if [ "$MODE" = "all" ] || [ "$MODE" = "encode" ]; then
   for bitrate in "${BITRATES[@]}"; do
     if [ "$ENCODER_MODE" = "vvencapp" ]; then
@@ -166,11 +233,13 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "encode" ]; then
         --no-api --offline --country-iso-code "$COUNTRY_ISO_CODE" -- \
         bash -o pipefail -c '
           ffmpeg -v error -nostdin -i "$1" \
-            -map 0:v:0 -an -f rawvideo -pix_fmt yuv420p - |
+            -map 0:v:0 -an -vf "${9:-null}" \
+            -f rawvideo -pix_fmt yuv420p - |
           vvencapp -i - -s "${2}x${3}" -c yuv420 --fps "$4" \
             --preset "$5" -t "$6" -p 1 -b "$7" -aud 1 -o "$8"
-        ' _ "$INPUT_FILE" "$SOURCE_WIDTH" "$SOURCE_HEIGHT" "$SOURCE_FPS" \
-          "$VVENC_PRESET" "$VVENC_THREADS" "$bitrate" "$bitstream"
+        ' _ "$INPUT_FILE" "$OUTPUT_WIDTH" "$OUTPUT_HEIGHT" "$SOURCE_FPS" \
+          "$VVENC_PRESET" "$VVENC_THREADS" "$bitrate" "$bitstream" \
+          "$SCALE_FILTER"
 
       fps_num="${SOURCE_FPS%/*}"
       fps_den="${SOURCE_FPS#*/}"
@@ -186,7 +255,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "encode" ]; then
       echo "Encoding $bitrate with $ENCODER ($CODEC_ARG)..."
       CODECARBON_PROJECT_NAME="$PROJECT_PREFIX-$bitrate" "$CODECARBON" monitor \
         --no-api --offline --country-iso-code "$COUNTRY_ISO_CODE" -- \
-        ffmpeg -y -i "$INPUT_FILE" \
+        ffmpeg -y -i "$INPUT_FILE" "${SCALE_ARGS[@]}" \
           -map 0:v:0 -map 0:a:0? \
           -c:v "$ENCODER" -b:v "$bitrate" \
           -c:a copy \

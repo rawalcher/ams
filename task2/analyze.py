@@ -14,6 +14,10 @@ produced by export-codecs.sh:
 VVC is encoded with the standalone vvencapp and decoded for PSNR with
 vvdecapp (AUR packages: vvenc and vvdec).
 
+Encodes may have a lower resolution than the source (for example 720p encodes
+from a 1080p source). The reference is scaled to each encoded file's size
+before PSNR is computed.
+
 When --codecs is omitted, the supported codecs (avc, hevc, av1, vvc) that
 actually have encoded files under <output-root> are detected automatically.
 
@@ -204,17 +208,35 @@ def vvc_lead_frames(reference: Path) -> int:
 
 
 def run_psnr(
-    encoded: Path, reference: Path, stats_file: Path, *, codec: str
+    encoded: Path,
+    reference: Path,
+    stats_file: Path,
+    *,
+    codec: str,
+    target_size: tuple[int, int] | None = None,
 ) -> None:
     """Run ffmpeg's PSNR filter and write per-frame statistics.
+
+    If ``target_size`` differs from the reference resolution, the reference is
+    scaled to it first. This allows encodes at a lower resolution such as 720p
+    to be compared against the original higher-resolution source.
 
     VVC is decoded with vvdecapp because ffmpeg's native VVC decoder used by
     this build does not reorder B-frames correctly. vvdecapp writes Y4M to
     stdout, which ffmpeg reads as the first input.
     """
+    reference_scale = ""
+    if target_size is not None:
+        reference_size = probe_video(reference)[2:]
+        if reference_size != target_size:
+            reference_scale = (
+                f"scale={target_size[0]}:{target_size[1]}:flags=bicubic,"
+            )
+
     graph = (
         "[0:v]setpts=PTS-STARTPTS,settb=AVTB,format=yuv420p[a];"
-        "[1:v]setpts=PTS-STARTPTS,settb=AVTB,format=yuv420p[b];"
+        f"[1:v]{reference_scale}setpts=PTS-STARTPTS,settb=AVTB,"
+        "format=yuv420p[b];"
         f"[a][b]psnr=stats_file={stats_file.as_posix()}"
     )
 
@@ -223,7 +245,8 @@ def run_psnr(
         vvc_graph = (
             f"[0:v]trim=start_frame={lead_frames},setpts=PTS-STARTPTS,"
             "settb=AVTB,format=yuv420p[a];"
-            "[1:v]setpts=PTS-STARTPTS,settb=AVTB,format=yuv420p[b];"
+            f"[1:v]{reference_scale}setpts=PTS-STARTPTS,settb=AVTB,"
+            "format=yuv420p[b];"
             f"[a][b]psnr=stats_file={stats_file.as_posix()}"
         )
         decoder = subprocess.Popen(
@@ -670,6 +693,7 @@ def main() -> int:
                 )
             psnr_input = bitstream if bitstream is not None else encoded
 
+            actual_kbps, duration, width, height = probe_video(encoded)
             stats_file = stats_dir / f"{label}.log"
             input_mtimes = [encoded.stat().st_mtime, source.stat().st_mtime]
             if bitstream is not None:
@@ -681,12 +705,17 @@ def main() -> int:
             )
             if args.force or not stats_are_current:
                 print(f"Computing PSNR for {codec} {label} ...", flush=True)
-                run_psnr(psnr_input, source, stats_file, codec=codec)
+                run_psnr(
+                    psnr_input,
+                    source,
+                    stats_file,
+                    codec=codec,
+                    target_size=(width, height),
+                )
             else:
                 print(f"Reusing PSNR stats for {codec} {label}")
 
             mse_avg, mse_y = parse_mse(stats_file)
-            actual_kbps, duration, width, height = probe_video(encoded)
             if bitstream is not None and duration > 0:
                 # Measure the video-only bitrate from the raw VVC bitstream.
                 actual_kbps = bitstream.stat().st_size * 8.0 / duration / 1000.0
